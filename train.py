@@ -8,18 +8,20 @@ import os
 def train():
     BATCH_SIZE = 8
     LEARNING_RATE = 0.001
-    EPOCHS = 100
+    EPOCHS = 500
     VALIDATION_SPLIT = 0.2
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    NOISY_DIR = os.path.join(BASE_DIR, 'NoisySpeech_training')
+    # Switch to Noise_training for dynamic mixing
+    NOISE_DIR = os.path.join(BASE_DIR, 'Noise_training')
     CLEAN_DIR = os.path.join(BASE_DIR, 'CleanSpeech_training')
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, 'denoiser.pth')
     
-    print(f"Looking for data in:\nNoisy: {NOISY_DIR}\nClean: {CLEAN_DIR}")
+    print(f"Looking for data in:\nNoise: {NOISE_DIR}\nClean: {CLEAN_DIR}")
     
-    full_dataset = SpectrogramDataset(NOISY_DIR, CLEAN_DIR)
+    # Initialize dynamic dataset
+    full_dataset = SpectrogramDataset(CLEAN_DIR, NOISE_DIR)
     if len(full_dataset) == 0:
         print("Error: No paired data found. Please check directory structure and file names.")
         return
@@ -40,6 +42,11 @@ def train():
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
     best_val_loss = float('inf')
+    
+    best_val_loss = float('inf')
+    
+    train_losses = []
+    val_losses = []
     
     for epoch in range(EPOCHS):
         model.train()
@@ -71,6 +78,9 @@ def train():
         
         avg_val_loss = val_loss / len(val_loader)
         
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        
         print(f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
         
         if avg_val_loss < best_val_loss:
@@ -80,6 +90,26 @@ def train():
     
     print(f"\nTraining complete. Best validation loss: {best_val_loss:.4f}")
     print(f"Model saved to {MODEL_SAVE_PATH}")
+    
+    # Plotting
+    import matplotlib.pyplot as plt
+    
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss (L1)')
+    plt.legend()
+    plt.grid(True)
+    
+    results_dir = os.path.join(BASE_DIR, 'results')
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+        
+    plot_path = os.path.join(results_dir, 'loss_curve.png')
+    plt.savefig(plot_path)
+    print(f"Loss curve saved to {plot_path}")
 
 if __name__ == "__main__":
     train()
