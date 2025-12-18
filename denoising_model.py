@@ -3,76 +3,111 @@ import torch.nn as nn
 import torchaudio
 import os
 import glob
+import random
 import soundfile as sf
+import math
 from torch.utils.data import Dataset
 
 class SpectrogramDataset(Dataset):
-    def __init__(self, noisy_dir, clean_dir, n_fft=512, hop_length=256, sample_rate=16000):
-        self.noisy_dir = noisy_dir
+    def __init__(self, clean_dir, noise_dir=None, n_fft=512, hop_length=256, sample_rate=16000):
         self.clean_dir = clean_dir
+        # If noise_dir is None, we assume it's the old behavior or handle appropriately, 
+        # but here we enforce its usage for dynamic mixing as requested.
+        self.noise_dir = noise_dir 
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.sample_rate = sample_rate
         
-        self.noisy_files = sorted(glob.glob(os.path.join(noisy_dir, '*.wav')))
         self.clean_files = sorted(glob.glob(os.path.join(clean_dir, '*.wav')))
         
-        self.clean_file_map = {os.path.basename(f): f for f in self.clean_files}
-        
-        self.data_pairs = []
-        for noisy_path in self.noisy_files:
-            noisy_filename = os.path.basename(noisy_path)
-            parts = noisy_filename.split('_')
-            if len(parts) > 1:
-                potential_clean_name = parts[-1]
-                if potential_clean_name in self.clean_file_map:
-                    self.data_pairs.append((noisy_path, self.clean_file_map[potential_clean_name]))
+        if self.noise_dir:
+            self.noise_files = sorted(glob.glob(os.path.join(noise_dir, '*.wav')))
+            if not self.noise_files:
+                print(f"Warning: No noise files found in {noise_dir}")
+        else:
+            self.noise_files = []
             
     def __len__(self):
-        return len(self.data_pairs)
+        return len(self.clean_files)
+
+    def _load_and_process(self, path, fixed_length):
+        data, sr = sf.read(path)
+        waveform = torch.from_numpy(data).float()
+        
+        if waveform.dim() > 1:
+            waveform = waveform.mean(dim=-1)
+            
+        if sr != self.sample_rate:
+            resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
+            waveform = resampler(waveform)
+            
+        # Pad or Crop
+        if len(waveform) < fixed_length:
+            pad_amount = fixed_length - len(waveform)
+            waveform = torch.nn.functional.pad(waveform, (0, pad_amount))
+        else:
+            # Random crop for training variety could be good, but simple crop is safer for now
+            # Let's do random start if it's much longer
+            if len(waveform) > fixed_length:
+                start = random.randint(0, len(waveform) - fixed_length)
+                waveform = waveform[start:start+fixed_length]
+            else:
+                waveform = waveform[:fixed_length]
+                
+        return waveform
 
     def __getitem__(self, idx):
-        noisy_path, clean_path = self.data_pairs[idx]
+        clean_path = self.clean_files[idx]
+        fixed_length = self.sample_rate * 2  # 2 second clips
         
-        noisy_data, noisy_sr = sf.read(noisy_path)
-        clean_data, clean_sr = sf.read(clean_path)
+        clean_waveform = self._load_and_process(clean_path, fixed_length)
         
-        noisy_waveform = torch.from_numpy(noisy_data).float()
-        clean_waveform = torch.from_numpy(clean_data).float()
-        
-        if noisy_waveform.dim() > 1:
-            noisy_waveform = noisy_waveform.mean(dim=-1)
-        if clean_waveform.dim() > 1:
-            clean_waveform = clean_waveform.mean(dim=-1)
+        # Dynamic Mixing
+        if self.noise_files:
+            noise_path = random.choice(self.noise_files)
+            noise_waveform = self._load_and_process(noise_path, fixed_length)
             
-        if noisy_sr != self.sample_rate:
-            resampler = torchaudio.transforms.Resample(noisy_sr, self.sample_rate)
-            noisy_waveform = resampler(noisy_waveform)
-        if clean_sr != self.sample_rate:
-            resampler = torchaudio.transforms.Resample(clean_sr, self.sample_rate)
-            clean_waveform = resampler(clean_waveform)
+            clean_rms = torch.sqrt(torch.mean(clean_waveform ** 2))
+            noise_rms = torch.sqrt(torch.mean(noise_waveform ** 2))
             
-        min_len = min(len(noisy_waveform), len(clean_waveform))
-        noisy_waveform = noisy_waveform[:min_len]
-        clean_waveform = clean_waveform[:min_len]
-        
-        fixed_length = self.sample_rate * 2
-        if len(noisy_waveform) < fixed_length:
-            pad_amount = fixed_length - len(noisy_waveform)
-            noisy_waveform = torch.nn.functional.pad(noisy_waveform, (0, pad_amount))
-            clean_waveform = torch.nn.functional.pad(clean_waveform, (0, pad_amount))
+            # Avoid division by zero
+            if clean_rms == 0: clean_rms = 1e-6
+            if noise_rms == 0: noise_rms = 1e-6
+
+            # Random SNR between 0 and 30 dB
+            snr_db = random.uniform(0, 30)
+            snr_linear = 10 ** (snr_db / 20)
+            
+            # Target noise RMS = Clean RMS / SNR
+            # We scale noise
+            target_noise_rms = clean_rms / snr_linear
+            scale_factor = target_noise_rms / noise_rms
+            
+            scaled_noise = noise_waveform * scale_factor
+            noisy_waveform = clean_waveform + scaled_noise
+            
+            # Optional: Normalize to avoid clipping? 
+            # Simple max norm:
+            max_val = torch.max(torch.abs(noisy_waveform))
+            if max_val > 1.0:
+                noisy_waveform = noisy_waveform / max_val
+                clean_waveform = clean_waveform / max_val
+                
         else:
-            noisy_waveform = noisy_waveform[:fixed_length]
-            clean_waveform = clean_waveform[:fixed_length]
+            # Fallback for testing or missing noise (should not happen in this prompt context)
+            noisy_waveform = clean_waveform.clone()
         
+        # STFT
+        window = torch.hann_window(self.n_fft)
         noisy_stft = torch.stft(noisy_waveform, n_fft=self.n_fft, hop_length=self.hop_length, 
-                                return_complex=True, normalized=False, window=torch.hann_window(self.n_fft))
+                                return_complex=True, normalized=False, window=window)
         clean_stft = torch.stft(clean_waveform, n_fft=self.n_fft, hop_length=self.hop_length, 
-                                return_complex=True, normalized=False, window=torch.hann_window(self.n_fft))
+                                return_complex=True, normalized=False, window=window)
         
         noisy_mag = torch.abs(noisy_stft)
         clean_mag = torch.abs(clean_stft)
         
+        # Add channel dimension
         noisy_mag = noisy_mag.unsqueeze(0)
         clean_mag = clean_mag.unsqueeze(0)
         
