@@ -4,24 +4,24 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from denoising_model import SpectrogramDataset, SpectrogramUNet
 import os
+import matplotlib.pyplot as plt
 
 def train():
     BATCH_SIZE = 8
     LEARNING_RATE = 0.001
-    EPOCHS = 500
+    EPOCHS = 1000
     VALIDATION_SPLIT = 0.2
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    # Switch to Noise_training for dynamic mixing
     NOISE_DIR = os.path.join(BASE_DIR, 'Noise_training')
     CLEAN_DIR = os.path.join(BASE_DIR, 'CleanSpeech_training')
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, 'denoiser.pth')
     
     print(f"Looking for data in:\nNoise: {NOISE_DIR}\nClean: {CLEAN_DIR}")
     
-    # Initialize dynamic dataset
     full_dataset = SpectrogramDataset(CLEAN_DIR, NOISE_DIR)
+
     if len(full_dataset) == 0:
         print("Error: No paired data found. Please check directory structure and file names.")
         return
@@ -43,14 +43,13 @@ def train():
     
     best_val_loss = float('inf')
     
-    best_val_loss = float('inf')
-    
     train_losses = []
     val_losses = []
     
     for epoch in range(EPOCHS):
         model.train()
         running_loss = 0.0
+        
         for i, (noisy, clean) in enumerate(train_loader):
             noisy, clean = noisy.to(DEVICE), clean.to(DEVICE)
             
@@ -90,10 +89,7 @@ def train():
     
     print(f"\nTraining complete. Best validation loss: {best_val_loss:.4f}")
     print(f"Model saved to {MODEL_SAVE_PATH}")
-    
-    # Plotting
-    import matplotlib.pyplot as plt
-    
+        
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')

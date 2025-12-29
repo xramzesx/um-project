@@ -11,8 +11,6 @@ from torch.utils.data import Dataset
 class SpectrogramDataset(Dataset):
     def __init__(self, clean_dir, noise_dir=None, n_fft=512, hop_length=256, sample_rate=16000):
         self.clean_dir = clean_dir
-        # If noise_dir is None, we assume it's the old behavior or handle appropriately, 
-        # but here we enforce its usage for dynamic mixing as requested.
         self.noise_dir = noise_dir 
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -180,8 +178,8 @@ class SpectrogramUNet(nn.Module):
             u1 = nn.functional.interpolate(u1, size=e1.shape[2:], mode='bilinear', align_corners=False)
         d1 = torch.cat([u1, e1], dim=1)
         d1 = self.dec1(d1)
-        
-        out = self.out(d1)
-        out = self.relu(out) 
+
+        mask = torch.sigmoid(self.out(d1))
+        out = mask * x 
 
         return out
